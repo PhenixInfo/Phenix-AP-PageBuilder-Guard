@@ -1,0 +1,5 @@
+# Phenix AP PageBuilder Guard
+# Prevent directory listing while keeping public module assets accessible.
+<IfModule mod_autoindex.c>
+    Options -Indexes
+</IfModule>

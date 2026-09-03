@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<module>
+    <name><![CDATA[phappagebuilderguard]]></name>
+    <displayName><![CDATA[Phenix AP PageBuilder Guard]]></displayName>
+    <version><![CDATA[1.1.10]]></version>
+    <description><![CDATA[Security hardening patch for AP Page Builder 2.2 to 2.4.9: SQL injection, path traversal, ApGenCode/SSTI, security logs and targeted scanning.]]></description>
+    <author><![CDATA[Phenix Info]]></author>
+    <tab><![CDATA[administration]]></tab>
+    <is_configurable>1</is_configurable>
+    <need_instance>0</need_instance>
+</module>

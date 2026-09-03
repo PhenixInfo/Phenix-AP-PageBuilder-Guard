@@ -1,0 +1,6 @@
+Phenix AP PageBuilder Guard is distributed under the Academic Free License 3.0 (AFL-3.0).
+
+SPDX-License-Identifier: AFL-3.0
+License text and terms: https://opensource.org/licenses/AFL-3.0
+
+Copyright (c) 2026 Phenix Info.
