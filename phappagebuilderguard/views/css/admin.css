@@ -279,15 +279,13 @@
   color: #fff;
 }
 
-.phapb-btn-secondary,
-.phapb-btn-light {
+.phapb-btn-secondary {
   border-color: #dbdde0;
   background: #fff;
   color: #1d1f23;
 }
 
-.phapb-btn-secondary:hover,
-.phapb-btn-light:hover {
+.phapb-btn-secondary:hover {
   border-color: #c5c8cd;
   background: #f7f8f9;
   color: #101114;
@@ -469,9 +467,6 @@
   background: var(--phapb-danger);
 }
 
-.phapb-metric.is-info .phapb-metric-dot {
-  background: var(--phapb-info);
-}
 
 .phapb-metric small,
 .phapb-metric strong,
@@ -598,14 +593,6 @@
   color: #55585d;
 }
 
-.phapb-alert-danger {
-  border-color: #edc2c2;
-  background: var(--phapb-danger-bg);
-}
-
-.phapb-alert-danger strong {
-  color: var(--phapb-danger);
-}
 
 .phapb-alert-info {
   border-color: #cfdeec;

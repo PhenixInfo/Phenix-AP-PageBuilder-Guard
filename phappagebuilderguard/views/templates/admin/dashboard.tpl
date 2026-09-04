@@ -207,7 +207,6 @@
                             <table class="table phapb-table">
                                 <thead>
                                     <tr>
-                                        <th>{$phapb.labels.severity|escape:'html':'UTF-8'}</th>
                                         <th>{$phapb.labels.type|escape:'html':'UTF-8'}</th>
                                         <th>{$phapb.labels.file|escape:'html':'UTF-8'}</th>
                                         <th>{$phapb.labels.line|escape:'html':'UTF-8'}</th>
@@ -217,7 +216,6 @@
                                 <tbody>
                                     {foreach from=$phapb.scan.entries item=item}
                                         <tr>
-                                            <td><span class="phapb-badge {$item.severity_class|escape:'html':'UTF-8'}">{$item.severity|escape:'html':'UTF-8'}</span></td>
                                             <td><code>{$item.type|escape:'html':'UTF-8'}</code></td>
                                             <td><code class="phapb-path">{$item.file|escape:'html':'UTF-8'}</code></td>
                                             <td>{$item.line|escape:'html':'UTF-8'}</td>
@@ -227,19 +225,6 @@
                                 </tbody>
                             </table>
                         </div>
-                        {if $phapb.scan.critical_count > 0}
-                            <div class="phapb-danger-zone">
-                                <div>
-                                    <strong>{$phapb.labels.manual_quarantine|escape:'html':'UTF-8'}</strong>
-                                    <p>{$phapb.scan.quarantine_description|escape:'html':'UTF-8'}</p>
-                                </div>
-                                <form method="post">
-                                    <input type="hidden" name="token" value="{$phapb.admin_token|escape:'html':'UTF-8'}">
-                                    <input type="hidden" name="phapb_tab" value="scan">
-                                    <button class="phapb-btn phapb-btn-danger-outline" name="phapb_quarantine" value="1" data-phapb-confirm="{$phapb.confirm.quarantine|escape:'html':'UTF-8'}">{$phapb.labels.quarantine_critical|escape:'html':'UTF-8'}</button>
-                                </form>
-                            </div>
-                        {/if}
                     {/if}
                 </section>
             {/if}

@@ -1,4 +1,4 @@
-# Phenix AP PageBuilder Guard 1.1.10
+# Phenix AP PageBuilder Guard 1.1.16
 
 Module communautaire de durcissement défensif pour les anciennes branches **AP Page Builder / `appagebuilder` 2.2.0 à 2.4.9**, destiné aux boutiques **PrestaShop 1.7.x à 8.x** qui ne peuvent pas encore migrer vers la branche officielle corrigée.
 
@@ -20,10 +20,11 @@ Une mise à jour officielle vers une version corrigée d'AP Page Builder reste p
 ## Compatibilité
 
 - PrestaShop : **1.7.x à 8.x** ;
+- PHP : **7.1 minimum** (la visibilité explicite des constantes, exigée par les standards Validator, nécessite PHP 7.1+) ;
 - AP Page Builder : **2.2.0 à 2.4.9** pour le patch automatique ;
 - AP Page Builder hors de cette plage : détection, informations et scanner restent accessibles, mais le patch automatique est désactivé.
 
-Archives réellement rejouées pendant la validation de la 1.1.9 : **2.4.1, 2.4.3, 2.4.5 et 2.4.8**. Les autres versions de la plage restent gérées par détection structurelle et arrêt sûr si le point d'insertion n'est pas reconnu.
+Archives réellement rejouées pendant la validation de la 1.1.16 : **2.4.1, 2.4.3, 2.4.5 et 2.4.8**. Les autres versions de la plage restent gérées par détection structurelle et arrêt sûr si le point d'insertion n'est pas reconnu.
 
 La version AP Page Builder est détectée dans cet ordre :
 
@@ -40,7 +41,7 @@ Aucune table SQL et aucun `PrestaShopLogger` ne sont utilisés.
 Emplacement :
 
 ```text
-/var/phappagebuilderguard/logs/security.log
+/var/phappagebuilderguard/logs/security.log.php
 ```
 
 Chaque événement contient notamment :
@@ -62,9 +63,72 @@ Limites :
 - 2 Mo par fichier ;
 - 3 rotations maximum ;
 - valeurs et payloads bornés ;
-- répertoire protégé par permissions, `.htaccess` et `index.php`.
+- répertoire protégé par permissions, `.htaccess` et `index.php` ;
+- le fichier courant commence par un garde PHP `exit`, afin de réduire le risque d’exposition directe sur une configuration nginx personnalisée qui ne lit pas `.htaccess`.
 
 Le journal est consultable et effaçable depuis l'onglet **Journal**.
+
+
+
+
+## Ajustements 1.1.16
+
+Release de conformité PrestaShop Validator uniquement. Aucun changement de logique sécurité. Le commentaire de licence du fichier principal est replacé immédiatement après `<?php`, sans ligne vide, conformément au contrôle **Licenses** du Validator. Cette contrainte de packaging prévaut pour ce fichier sur le signal contradictoire `blank_line_after_opening_tag` observé précédemment dans **Standards**.
+
+## Ajustements 1.1.15
+
+Release de conformité PrestaShop Validator uniquement. Aucun changement de logique sécurité : application des règles PHP CS Fixer remontées sur `phappagebuilderguard.php` (`class_attributes_separation`, `blank_line_after_opening_tag`, `no_extra_blank_lines`, `blank_line_before_statement`, `single_blank_line_at_eof`).
+
+## Ajustements 1.1.14
+
+La 1.1.14 traite les derniers résiduels de la revue 1.1.12 sans élargir la surface fonctionnelle :
+
+- filet SQLi générique resserré pour ne plus bloquer des phrases anglaises légitimes comme `Select from our new collection`, `Insert into your basket`, `Sleep (Deluxe Edition)` ou `1 and 1=1` ;
+- détection galerie tolérante à la casse en défense en profondeur ;
+- `show_number` tableau/objet rejeté avant toute conversion en chaîne, sans warning PHP ;
+- documentation du marqueur `_PRODUCTLIST_STORAGE_` corrigée : il est obligatoire pour le statut `Patch actif` ;
+- mise à jour depuis une ancienne branche patchée : si le marqueur STORAGE manque, le statut devient volontairement `Patch incomplet` et il faut relancer le patch après sauvegarde ;
+- les écritures `.js`, `.css` et `.xml` restent autorisées car les quatre archives AP testées les utilisent réellement pour les profils/positions/export. Le Guard bloque le PHP/webshell serveur, mais ne tente pas d'interpréter le JavaScript/CSS métier du page builder.
+
+## Audit renforcé 1.1.13
+
+La 1.1.13 est issue d'une passe séparée de simplification, revue de code et audit sécurité/fuzzing :
+
+- le scanner refuse désormais les fichiers/liens symboliques et vérifie le `realpath()` de chaque fichier avant lecture afin de ne jamais sortir de `/modules/appagebuilder/` ;
+- le garde générique d'écriture refuse une cible existante qui est un lien symbolique ;
+- le filet SQLi des paramètres AJAX inconnus inspecte la valeur complète, sans ancienne coupure à 4 Kio ;
+- les commentaires SQL `/**/` et commentaires conditionnels MySQL sont normalisés avant la détection haute confiance ;
+- suppression du manifeste post-patch inutilisé, de champs AP calculés mais jamais affichés et de plusieurs helpers à appel unique/relectures disque inutiles ;
+- la suite de fuzzing déterministe couvre maintenant plus de 800 cas, dont les paramètres SQLi connus, mutations de casse/espaces/commentaires, préfixes longs, symlinks, chemins de template et sauvegarde/restauration manuelle exacte.
+
+Les sauvegardes automatiques avant patch, le rollback pré-patch et les sauvegardes manuelles restent inchangés et obligatoires.
+
+## Simplifications 1.1.12
+
+La 1.1.12 recentre le module sur son rôle de **patch/guard** :
+
+- suppression complète de la quarantaine et de sa restauration ;
+- scanner désormais explicitement **100 % lecture seule** ;
+- aucune suppression, aucun déplacement et aucune modification de fichier par le scanner ;
+- la quarantaine/remédiation reste du ressort d'un scanner malware dédié ;
+- suppression des niveaux `severity` / `confidence` qui étaient constants pour toutes les signatures du scanner ;
+- suppression de l'abstraction `getScanRoots()` alors que le périmètre est volontairement unique et fixe ;
+- simplification de la création du répertoire de sauvegarde.
+
+Ces suppressions réduisent la surface de code et le risque opérationnel sans modifier les protections runtime ni le mécanisme de patch/rollback.
+
+## Durcissements 1.1.11
+
+La 1.1.11 intègre les corrections issues d'une revue externe approfondie :
+
+- aucune écriture `.php`, `.phtml`, `.htaccess` ou extension inconnue via `ApPageSetting::writeFile()` ;
+- aucun court-circuit `leoajax=1` des contrôles `show_number` ou `config` ;
+- faux positifs `Pack (`, `Touch (`, `Copy (` et `{insert}` supprimés ;
+- `form_id` absent ne provoque plus un 403 ;
+- `product_item_path` ne fait plus confiance à `$_COOKIE` brut ;
+- résolution des templates indépendante du répertoire de travail PHP ;
+- statut de patch exige aussi les marqueurs `_PRODUCTLIST_STORAGE_` ;
+- historique : la 1.1.11 avait introduit une quarantaine réversible ; cette fonctionnalité a été entièrement supprimée en 1.1.12 au profit d'un scanner strictement en lecture seule.
 
 ## Protections appliquées
 
@@ -112,7 +176,7 @@ L'ancien téléchargement de fichiers depuis une URL HTTP distante non signée/n
 
 ## Scanner
 
-Le scanner intégré est volontairement limité à :
+Le scanner intégré est **en lecture seule** et volontairement limité à :
 
 ```text
 /modules/appagebuilder/
@@ -126,7 +190,7 @@ Il ne scanne jamais :
 - `var/` ;
 - les zones d'upload.
 
-Cette limite est volontaire afin que le Guard reste un patch ciblé et non un scanner malware généraliste.
+Cette limite est volontaire afin que le Guard reste un patch ciblé et non un scanner malware généraliste. Le scanner n'a aucune action de quarantaine ou de suppression : il signale uniquement les correspondances afin qu'elles soient examinées avec l'outil malware dédié.
 
 Conséquence : un fichier compromis déjà présent dans :
 

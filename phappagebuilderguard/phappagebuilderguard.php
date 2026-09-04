@@ -27,7 +27,7 @@ class PhApPageBuilderGuard extends Module
     {
         $this->name = 'phappagebuilderguard';
         $this->tab = 'administration';
-        $this->version = '1.1.10';
+        $this->version = '1.1.16';
         $this->author = 'Phenix Info';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -63,8 +63,11 @@ class PhApPageBuilderGuard extends Module
             return '';
         }
 
-        $controller = Tools::getValue('controller');
-        if (strpos((string) $controller, 'AdminApPageBuilder') === false) {
+        $controller = (string) Tools::getValue('controller');
+        $isApPageBuilder = strpos($controller, 'AdminApPageBuilder') !== false;
+        $isDashboard = $controller === 'AdminDashboard';
+        $isGuardPage = $controller === 'AdminModules' && (string) Tools::getValue('configure') === $this->name;
+        if (!$isApPageBuilder && !$isDashboard && !$isGuardPage) {
             return '';
         }
 
@@ -134,13 +137,6 @@ class PhApPageBuilderGuard extends Module
                 $scan = PhApPageBuilderGuardCore::scanInstallation();
                 $messages[] = sprintf($this->l('Scan termine : %d alerte(s).'), count($scan));
             }
-
-            if (Tools::isSubmit('phapb_quarantine')) {
-                $scan = PhApPageBuilderGuardCore::scanInstallation();
-                $count = $this->quarantineCriticalFindings($scan);
-                $messages[] = sprintf($this->l('Quarantaine terminee : %d fichier(s) deplace(s).'), $count);
-                $scan = PhApPageBuilderGuardCore::scanInstallation();
-            }
         } catch (Exception $e) {
             $errors[] = $e->getMessage();
         }
@@ -165,7 +161,6 @@ class PhApPageBuilderGuard extends Module
             'phapb_backup_now',
             'phapb_restore_manual',
             'phapb_restore',
-            'phapb_quarantine',
         ] as $action) {
             if (Tools::isSubmit($action)) {
                 return true;
@@ -332,13 +327,10 @@ class PhApPageBuilderGuard extends Module
             'results' => $this->l('RESULTATS'),
             'compliant' => $this->l('Conforme'),
             'no_alert' => $this->l('Aucune alerte detectee'),
-            'severity' => $this->l('Severite'),
             'type' => $this->l('Type'),
             'file' => $this->l('Fichier'),
             'line' => $this->l('Ligne'),
             'match' => $this->l('Indice'),
-            'manual_quarantine' => $this->l('Quarantaine manuelle'),
-            'quarantine_critical' => $this->l('Mettre les critiques en quarantaine'),
             'guard_protection' => $this->l('Protection du guard'),
             'runtime_protection' => $this->l('Protection runtime'),
             'enabled' => $this->l('Activee'),
@@ -382,7 +374,6 @@ class PhApPageBuilderGuard extends Module
             'patch' => $this->l('Appliquer le patch avec sauvegarde des fichiers originaux ?'),
             'rollback' => $this->l('Restaurer les derniers fichiers sauvegardes avant patch ? Le patch sera retire des fichiers restaures.'),
             'clear_logs' => $this->l('Supprimer le journal de securite et ses rotations ?'),
-            'quarantine' => $this->l('Deplacer en quarantaine uniquement les fichiers critiques a haute confiance ?'),
             'restore_manual' => $this->l('Restaurer la derniere sauvegarde manuelle ? Une copie de l etat actuel sera creee avant restauration.'),
         ];
     }
@@ -436,7 +427,7 @@ class PhApPageBuilderGuard extends Module
                 ['title' => $this->l('SQL injection historique'), 'description' => $this->l('Validation stricte des listes numeriques utilisees par les appels leoajax des branches anciennes.')],
                 ['title' => $this->l('CVE-2024-6648'), 'description' => $this->l('Blocage de product_item_path fourni dans config et validation du chemin de template.')],
                 ['title' => $this->l('ApGenCode / SSTI'), 'description' => $this->l('Controle des ecritures de templates et des primitives Smarty capables d ecrire ou executer du PHP.')],
-                ['title' => $this->l('Journal securise'), 'description' => $this->l('Blocages traces dans un fichier JSONL rotatif, sans table SQL et avec secrets masques.')],
+                ['title' => $this->l('Journal securise'), 'description' => $this->l('Blocages traces dans un journal JSONL protege par garde PHP, sans table SQL et avec secrets masques.')],
             ],
             'actions_description' => $this->l('Les actions restent explicites et le scanner reste strictement borne a /modules/appagebuilder/.'),
             'actions' => [
@@ -485,7 +476,7 @@ class PhApPageBuilderGuard extends Module
             'entries' => $rows,
             'count' => count($rows),
             'info' => $info,
-            'description' => $this->l('Aucune table SQL : fichier JSONL protege, rotation a 2 Mo et trois archives maximum. Les mots de passe, tokens, cookies, sessions, secrets et cles API sont masques avant ecriture.'),
+            'description' => $this->l('Aucune table SQL : journal JSONL protege par garde PHP, rotation a 2 Mo et trois archives maximum. Seuls les parametres AP Page Builder utiles a l analyse sont conserves et les secrets connus sont masques avant ecriture.'),
             'clear_description' => $this->l('Supprime uniquement security.log et ses rotations. Aucun fichier AP Page Builder n est modifie.'),
             'empty_description' => $this->l('Les blocages et anomalies detectes par le guard apparaitront ici.'),
             'ip_description' => $this->l('Le champ IP utilise REMOTE_ADDR. Les en-tetes CF-Connecting-IP, X-Forwarded-For ou X-Real-IP sont conserves separement comme information non fiable, car ils peuvent etre usurpes sans configuration de proxy de confiance.'),
@@ -501,29 +492,14 @@ class PhApPageBuilderGuard extends Module
      */
     private function buildScanView($scan)
     {
-        $rows = [];
-        $criticalCount = 0;
-
-        if (is_array($scan)) {
-            foreach ($scan as $item) {
-                $severity = isset($item['severity']) ? strtolower((string) $item['severity']) : '';
-                if ($severity === 'critical') {
-                    ++$criticalCount;
-                }
-                $item['severity_class'] = $severity === 'critical' ? 'is-danger' : ($severity === 'warning' ? 'is-warning' : 'is-neutral');
-                $rows[] = $item;
-            }
-        }
+        $rows = is_array($scan) ? $scan : [];
 
         return [
             'ran' => is_array($scan),
             'entries' => $rows,
-            'critical_count' => $criticalCount,
-            'critical_label' => sprintf($this->l('%d critique(s)'), $criticalCount),
             'result_title' => sprintf($this->l('%d alerte(s) detectee(s)'), count($rows)),
-            'description' => $this->l('Analyse uniquement les fichiers situes sous /modules/appagebuilder/. La racine PrestaShop, les themes et les autres modules sont volontairement exclus.'),
-            'empty_description' => $this->l('Aucune signature surveillee n a ete trouvee dans le perimetre AP Page Builder.'),
-            'quarantine_description' => $this->l('Deplace uniquement les fichiers critiques a haute confiance, et uniquement s ils sont sous /modules/appagebuilder/.'),
+            'description' => $this->l('Analyse en lecture seule uniquement les fichiers situes sous /modules/appagebuilder/. Le scanner ne deplace, ne supprime et ne modifie aucun fichier. La racine PrestaShop, les themes et les autres modules sont volontairement exclus.'),
+            'empty_description' => $this->l('Aucune signature a haute confiance n a ete trouvee dans le perimetre AP Page Builder.'),
         ];
     }
 
@@ -544,7 +520,7 @@ class PhApPageBuilderGuard extends Module
             'runtime_items' => [
                 [
                     'title' => $this->l('Requetes AJAX et parametres'),
-                    'description' => $this->l('Controle le token leoajax quand la variante AP Page Builder le gere, valide les listes numeriques et bloque les charges SQLi/XSS historiques avant le code vulnerable.'),
+                    'description' => $this->l('Controle le token leoajax quand la variante AP Page Builder le gere, cumule les controles galerie/config, valide les listes numeriques et ajoute un filet SQLi a haute confiance pour les anciens parametres inconnus.'),
                 ],
                 [
                     'title' => $this->l('Config Base64 et chemins'),
@@ -552,11 +528,11 @@ class PhApPageBuilderGuard extends Module
                 ],
                 [
                     'title' => $this->l('ApGenCode et ecritures de templates'),
-                    'description' => $this->l('Controle les noms, chemins et contenus avant ecriture des fichiers .tpl afin de bloquer les primitives Smarty/PHP de type dropper, SSTI ou webshell.'),
+                    'description' => $this->l('Controle les noms, chemins, extensions et contenus avant ecriture : seuls les formats AP Page Builder attendus sont admis et les scripts PHP/configurations serveur sont refuses.'),
                 ],
                 [
                     'title' => $this->l('Journalisation des blocages'),
-                    'description' => $this->l('Chaque blocage du Guard est trace dans le journal fichier securise avec date, IP, methode, URL, motif et payload filtre, sans base de donnees.'),
+                    'description' => $this->l('Chaque blocage du Guard est trace avec date, IP, methode, URL, motif et uniquement les parametres AP Page Builder utiles, filtres et bornes, sans base de donnees.'),
                 ],
             ],
             'runtime_why' => $this->l('Pourquoi la laisser active ? Les fichiers AP Page Builder restent patches si vous desactivez cette option, mais les controles dynamiques appeles par le patch cessent alors de filtrer les requetes. La desactivation est surtout prevue pour un diagnostic temporaire en cas de doute ou de faux positif, puis la protection doit etre reactivee.'),
@@ -711,22 +687,14 @@ class PhApPageBuilderGuard extends Module
 
     private function ensureWritableDirs()
     {
-        foreach ([$this->getBackupDir(), $this->getQuarantineDir()] as $storageDir) {
-            if (!is_dir($storageDir) && !@mkdir($storageDir, 0750, true)) {
-                return false;
-            }
-            @chmod($storageDir, 0750);
-            $this->protectStorageDir($storageDir);
+        $storageDir = $this->getBackupDir();
+        if (!is_dir($storageDir) && !@mkdir($storageDir, 0750, true)) {
+            return false;
         }
+        @chmod($storageDir, 0750);
+        $this->protectStorageDir($storageDir);
 
         return true;
-    }
-
-    private function getApPageBuilderVersion()
-    {
-        $info = $this->getApPageBuilderInfo();
-
-        return $info['version'];
     }
 
     private function getApPageBuilderInfo()
@@ -743,8 +711,6 @@ class PhApPageBuilderGuard extends Module
             'supported' => false,
             'ajax_token' => false,
             'apgencode' => false,
-            'apgencode_pattern' => false,
-            'product_path_cookie' => false,
         ];
 
         if (!$info['installed']) {
@@ -794,14 +760,6 @@ class PhApPageBuilderGuard extends Module
         $gen = $root . 'classes/shortcodes/ApGenCode.php';
         if (is_file($gen) && is_readable($gen)) {
             $info['apgencode'] = true;
-            $content = Tools::file_get_contents($gen);
-            $info['apgencode_pattern'] = strpos($content, 'content_html') !== false && strpos($content, 'ApPageSetting::writeFile') !== false;
-        }
-
-        $productList = $root . 'classes/shortcodes/ApProductList.php';
-        if (is_file($productList) && is_readable($productList)) {
-            $content = Tools::file_get_contents($productList);
-            $info['product_path_cookie'] = strpos($content, 'productItemPathApProductList_') !== false;
         }
 
         $this->apPageBuilderInfoCache = $info;
@@ -816,12 +774,12 @@ class PhApPageBuilderGuard extends Module
 
     private function protectStorageDir($dir)
     {
-        $htaccess = rtrim($dir, '/\\\\') . '/.htaccess';
+        $htaccess = rtrim($dir, '/\\') . '/.htaccess';
         if (!is_file($htaccess)) {
             @file_put_contents($htaccess, "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n");
             @chmod($htaccess, 0600);
         }
-        $index = rtrim($dir, '/\\\\') . '/index.php';
+        $index = rtrim($dir, '/\\') . '/index.php';
         if (!is_file($index)) {
             @file_put_contents($index, "<?php\nexit;\n");
             @chmod($index, 0600);
@@ -890,6 +848,8 @@ class PhApPageBuilderGuard extends Module
                 'markers' => [
                     self::PATCH_MARKER . '_PRODUCTLIST_INPUT_START',
                     self::PATCH_MARKER . '_PRODUCTLIST_INPUT_END',
+                    self::PATCH_MARKER . '_PRODUCTLIST_STORAGE_START',
+                    self::PATCH_MARKER . '_PRODUCTLIST_STORAGE_END',
                     self::PATCH_MARKER . '_PRODUCTLIST_PATH_START',
                     self::PATCH_MARKER . '_PRODUCTLIST_PATH_END',
                 ],
@@ -961,27 +921,6 @@ class PhApPageBuilderGuard extends Module
         return is_string($content) ? $content : '';
     }
 
-    private function isApGenCodeGuardApplicable($file)
-    {
-        if (!is_file($file) || !is_readable($file)) {
-            return false;
-        }
-        $content = Tools::file_get_contents($file);
-
-        return strpos($content, 'content_html') !== false && strpos($content, 'ApPageSetting::writeFile') !== false;
-    }
-
-    private function isRemoteBreadcrumbHardeningApplicable($file)
-    {
-        if (!is_file($file) || !is_readable($file)) {
-            return false;
-        }
-        $content = Tools::file_get_contents($file);
-
-        return strpos($content, 'updateBreadcrumb') !== false
-            && preg_match('#http://leothe[^\\n]{0,40}me\\.com/updatemodule/appagebuilder/#i', $content);
-    }
-
     private function applyPatch()
     {
         $info = $this->getApPageBuilderInfo();
@@ -1003,7 +942,6 @@ class PhApPageBuilderGuard extends Module
         $this->patchApProductList($messages);
         $this->patchApGenCode($messages);
         $this->patchRemoteBreadcrumb($messages);
-        $this->writePatchManifest();
 
         $status = $this->getPatchStatus();
         if (!$status['patched']) {
@@ -1104,8 +1042,8 @@ class PhApPageBuilderGuard extends Module
         }
 
         // Stockage du chemin : convertit aussi la variante vulnerable documentee
-        // par PrestaShop en cookie serveur. Ce marqueur est informatif ; la protection
-        // runtime est assuree en plus par le controle du chemin a la lecture.
+        // par PrestaShop en cookie serveur. Ce marqueur est obligatoire : son absence
+        // maintient le statut en Patch incomplet et fait echouer le patch en mode fail-safe.
         if (strpos($content, self::PATCH_MARKER . '_PRODUCTLIST_STORAGE_START') === false) {
             $storagePattern = '/^([ \\t]*)(?!\\/\\/)\\$apPConfig\\[[\\\'\"]product_item_path[\\\'\"]\\]\\s*=\\s*\\$assign\\[[\\\'\"]product_item_path[\\\'\"]\\]\\s*;[ \\t]*$/m';
             $storageReplacement = '$1/* ' . self::PATCH_MARKER . "_PRODUCTLIST_STORAGE_START */\n"
@@ -1121,6 +1059,8 @@ class PhApPageBuilderGuard extends Module
                 if ($countCookie === 1) {
                     $content = $content2;
                     $changed = true;
+                } else {
+                    throw new Exception('Stockage product_item_path introuvable dans ApProductList.php. Patch abandonne.');
                 }
             }
         }
@@ -1170,7 +1110,7 @@ class PhApPageBuilderGuard extends Module
 
             return;
         }
-        if (!$this->isApGenCodeGuardApplicable($file)) {
+        if (strpos($content, 'content_html') === false || strpos($content, 'ApPageSetting::writeFile') === false) {
             $messages[] = 'ApGenCode.php present mais motif historique content_html/writeFile non detecte : aucune modification.';
 
             return;
@@ -1209,7 +1149,8 @@ class PhApPageBuilderGuard extends Module
 
             return;
         }
-        if (!$this->isRemoteBreadcrumbHardeningApplicable($file)) {
+        if (strpos($content, 'updateBreadcrumb') === false
+            || !preg_match('#http://leothe[^\\n]{0,40}me\\.com/updatemodule/appagebuilder/#i', $content)) {
             $messages[] = 'Aucun telechargement HTTP historique updateBreadcrumb detecte.';
 
             return;
@@ -1379,25 +1320,6 @@ class PhApPageBuilderGuard extends Module
         @chmod($backup, 0600);
     }
 
-    private function writePatchManifest()
-    {
-        $manifest = [
-            'date' => date('c'),
-            'module' => $this->version,
-            'appagebuilder' => $this->getApPageBuilderVersion(),
-            'files' => [],
-        ];
-        foreach (array_keys($this->getPatchTargets()) as $file) {
-            if (is_file($file)) {
-                $manifest['files'][] = ['file' => $file, 'sha256' => hash_file('sha256', $file)];
-            }
-        }
-        $manifest['backup_dir'] = $this->getBackupDir();
-        $manifestFile = $this->getBackupDir() . '/manifest.json';
-        @file_put_contents($manifestFile, json_encode($manifest, JSON_PRETTY_PRINT));
-        @chmod($manifestFile, 0600);
-    }
-
     private function getPatchTargets()
     {
         return [
@@ -1411,30 +1333,12 @@ class PhApPageBuilderGuard extends Module
 
     private function getBackupDir()
     {
-        if (defined('_PS_ROOT_DIR_')) {
-            return rtrim(_PS_ROOT_DIR_, '/\\') . '/var/phappagebuilderguard/backups';
-        }
-
-        return dirname(__FILE__) . '/backups';
-    }
-
-    private function getQuarantineDir()
-    {
-        if (defined('_PS_ROOT_DIR_')) {
-            return rtrim(_PS_ROOT_DIR_, '/\\') . '/var/phappagebuilderguard/quarantine';
-        }
-
-        return dirname(__FILE__) . '/quarantine';
+        return rtrim(_PS_ROOT_DIR_, '/\\') . '/var/phappagebuilderguard/backups';
     }
 
     private function getLegacyBackupDir()
     {
         return dirname(__FILE__) . '/backups';
-    }
-
-    private function getBackupRelativeName($file)
-    {
-        return str_replace([_PS_ROOT_DIR_, '\\', '/'], ['', '_', '_'], $file);
     }
 
     private function hasAnyBackup()
@@ -1450,7 +1354,7 @@ class PhApPageBuilderGuard extends Module
 
     private function findLatestBackupForFile($file)
     {
-        $relative = $this->getBackupRelativeName($file);
+        $relative = str_replace([_PS_ROOT_DIR_, '\\', '/'], ['', '_', '_'], $file);
         $pattern = '*-' . substr(sha1($file), 0, 10) . $relative . '.bak';
         $candidates = [];
 
@@ -1541,7 +1445,7 @@ class PhApPageBuilderGuard extends Module
         $manifest = [
             'date' => date('c'),
             'guard_version' => $this->version,
-            'appagebuilder_version' => $this->getApPageBuilderVersion(),
+            'appagebuilder_version' => $this->getApPageBuilderInfo()['version'],
             'files' => [],
         ];
 
@@ -1676,40 +1580,5 @@ class PhApPageBuilderGuard extends Module
         }
 
         return $messages;
-    }
-
-    private function quarantineCriticalFindings(array $scan)
-    {
-        $count = 0;
-        foreach ($scan as $item) {
-            if ($item['severity'] !== 'critical') {
-                continue;
-            }
-            if (empty($item['file']) || !is_file($item['file'])) {
-                continue;
-            }
-
-            // Defense en profondeur : aucune quarantaine hors /modules/appagebuilder/.
-            $moduleRoot = realpath(_PS_MODULE_DIR_ . 'appagebuilder/');
-            $candidate = realpath($item['file']);
-            if ($moduleRoot === false || $candidate === false) {
-                continue;
-            }
-            $moduleRoot = rtrim(str_replace('\\', '/', $moduleRoot), '/') . '/';
-            $candidateNormalized = str_replace('\\', '/', $candidate);
-            if (strpos($candidateNormalized, $moduleRoot) !== 0) {
-                PhApPageBuilderGuardCore::logEvent('quarantine_refused_outside_scope', $candidateNormalized);
-
-                continue;
-            }
-
-            $target = $this->getQuarantineDir() . '/' . date('Ymd-His') . '-' . basename($item['file']) . '.quarantine';
-            if (@rename($item['file'], $target)) {
-                ++$count;
-                PhApPageBuilderGuardCore::logEvent('quarantine', $item['file'] . ' -> ' . $target);
-            }
-        }
-
-        return $count;
     }
 }

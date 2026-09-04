@@ -16,7 +16,10 @@ if (!defined('_PS_VERSION_')) {
 class PhApPageBuilderGuardCore
 {
     public const CONFIG_ENABLED = 'PHAPB_GUARD_ENABLED';
-    public const LOG_FILE = 'security.log';
+    public const LOG_FILE = 'security.log.php';
+    public const LOG_PREFIX = 'security.log';
+    public const LEGACY_LOG_FILE = 'security.log';
+    public const LOG_GUARD = "<?php exit; ?>\n";
     public const MAX_LOG_BYTES = 2097152;
     public const MAX_LOG_FILES = 3;
     public const MAX_LOG_VALUE = 1024;
@@ -25,7 +28,7 @@ class PhApPageBuilderGuardCore
     public const MAX_INSPECTION_TOTAL = 16384;
     public const MAX_CONFIG_DEPTH = 32;
 
-    public static function guardApAjax($tokenRequired = null)
+    public static function guardApAjax($tokenRequired = false)
     {
         if (!self::isEnabled()) {
             return;
@@ -33,37 +36,25 @@ class PhApPageBuilderGuardCore
 
         self::guardCommonRequestPayload();
 
-        // Certaines branches historiques (2.2 / 2.3 / debut 2.4) ne valident
-        // pas le token de la meme maniere. On reproduit le niveau de controle
-        // du fichier apajax.php installe pour eviter les faux positifs.
-        if ($tokenRequired === null) {
-            $tokenRequired = self::apAjaxUsesTokenCheck();
-        }
-
-        if ((string) self::getRequestValue('action') === 'get-product-link') {
-            return;
-        }
-
+        // Les controles sont volontairement cumulatifs. Un attaquant ne doit pas
+        // pouvoir ajouter leoajax=1 pour court-circuiter une verification galerie
+        // ou config presente dans la meme requete.
         if (self::getRequestValue('leoajax') == 1) {
             if ($tokenRequired && (!class_exists('Tools') || Tools::getToken(false) !== (string) self::getRequestValue('token'))) {
                 self::block('token AJAX invalide');
             }
             self::sanitizeAjaxIntegerParameters();
+            self::sanitizeAjaxSortParameters();
+            self::guardUnknownAjaxSqlInjection();
             self::guardShortcodeAjax();
-
-            return;
         }
 
-        if ((string) self::getRequestValue('widget') === 'ApImageGallery') {
+        if (strcasecmp((string) self::getRequestValue('widget'), 'ApImageGallery') === 0) {
             self::guardImageGalleryAjax();
-
-            return;
         }
 
         if (self::getRequestValue('config') !== null && self::getRequestValue('config') !== '') {
             self::sanitizeConfigRequest();
-
-            return;
         }
 
         // Compatibilite : les branches 2.2 a 2.4.9 ne possedent pas toutes les
@@ -80,6 +71,9 @@ class PhApPageBuilderGuardCore
         if ($target === '' || strpos($target, "\0") !== false || preg_match('#(^|/)\.\.(/|$)#', $target)) {
             self::throwBlock('chemin ecriture interdit', $target);
         }
+        if (is_link($target)) {
+            self::throwBlock('cible ecriture symbolique interdite', $target);
+        }
 
         $dir = dirname($target);
         $realDir = realpath($dir);
@@ -88,17 +82,59 @@ class PhApPageBuilderGuardCore
         }
 
         $root = realpath(_PS_ROOT_DIR_);
-        if ($root !== false && strpos(str_replace('\\', '/', $realDir), str_replace('\\', '/', $root)) !== 0) {
-            self::throwBlock('ecriture hors racine PrestaShop', $target);
+        if ($root !== false) {
+            $rootNormalized = rtrim(str_replace('\\', '/', $root), '/') . '/';
+            $realDirNormalized = rtrim(str_replace('\\', '/', $realDir), '/') . '/';
+            if (strpos($realDirNormalized, $rootNormalized) !== 0) {
+                self::throwBlock('ecriture hors racine PrestaShop', $target);
+            }
         }
 
+        $allowedWriteRoots = [
+            realpath(_PS_MODULE_DIR_ . 'appagebuilder/'),
+            defined('_PS_THEME_DIR_') ? realpath(_PS_THEME_DIR_) : false,
+        ];
+        $insideAllowedRoot = false;
+        foreach ($allowedWriteRoots as $allowedWriteRoot) {
+            if ($allowedWriteRoot === false) {
+                continue;
+            }
+            $allowedWriteRoot = rtrim(str_replace('\\', '/', $allowedWriteRoot), '/') . '/';
+            $realDirNormalized = rtrim(str_replace('\\', '/', $realDir), '/') . '/';
+            if (strpos($realDirNormalized, $allowedWriteRoot) === 0) {
+                $insideAllowedRoot = true;
+
+                break;
+            }
+        }
+        if (!$insideAllowedRoot) {
+            self::throwBlock('ecriture hors perimetre AP Page Builder/theme', $target);
+        }
+
+        $base = strtolower(basename($target));
+        if (in_array($base, ['.htaccess', '.user.ini', 'php.ini', 'web.config'], true)) {
+            self::throwBlock('fichier de configuration executable interdit', $target);
+        }
+
+        // ApPageSetting::writeFile() est utilise par les branches 2.x pour les
+        // templates, CSS, JS et exports XML. Toute autre extension est refusee
+        // afin qu'un chemin controle ne puisse jamais deposer un script PHP.
         $extension = strtolower(pathinfo($target, PATHINFO_EXTENSION));
+        if (!in_array($extension, ['tpl', 'js', 'css', 'xml'], true)) {
+            self::throwBlock('extension ecriture non autorisee', $target);
+        }
+
+        $content = (string) $value;
+        if (preg_match('/<\?(?:php|=)/i', $content) || self::looksLikePhpWebshell($content)) {
+            self::throwBlock('contenu executable interdit', $target);
+        }
+
         if ($extension === 'tpl') {
             $base = basename($target);
             if (!preg_match('/^[a-zA-Z0-9_.-]+\.tpl$/', $base)) {
                 self::throwBlock('nom de template non autorise', $target);
             }
-            self::assertSafeSmartyTemplate((string) $value, $target);
+            self::assertSafeSmartyTemplate($content, $target);
         }
     }
 
@@ -144,52 +180,71 @@ class PhApPageBuilderGuardCore
 
     public static function getSafeProductItemPath($formId)
     {
+        $default = 'catalog/_partials/miniatures/product.tpl';
         if (!self::isEnabled()) {
             $cookieName = 'productItemPathApProductList_' . $formId;
 
-            return isset(Context::getContext()->cookie->{$cookieName}) ? Context::getContext()->cookie->{$cookieName} : 'catalog/_partials/miniatures/product.tpl';
+            return isset(Context::getContext()->cookie->{$cookieName}) ? Context::getContext()->cookie->{$cookieName} : $default;
         }
 
         $formId = (string) $formId;
+        if ($formId === '') {
+            self::logEvent('product_form_id_missing', 'form_id absent : template produit par defaut utilise');
+
+            return $default;
+        }
         if (!preg_match('/^[a-zA-Z0-9_-]{1,80}$/', $formId)) {
-            self::block('form_id produit invalide');
+            self::logEvent('product_form_id_rejected', 'form_id invalide : template produit par defaut utilise');
+
+            return $default;
         }
 
         $cookieName = 'productItemPathApProductList_' . $formId;
         $path = null;
         if (isset(Context::getContext()->cookie->{$cookieName})) {
+            // Seule la Cookie PrestaShop signee/chiffree est une source de confiance.
+            // Ne jamais retomber sur $_COOKIE brut, forgeable par le client.
             $path = Context::getContext()->cookie->{$cookieName};
-        } elseif (isset($_COOKIE[$cookieName])) {
-            $path = $_COOKIE[$cookieName];
         }
 
-        if (is_string($path) && self::isSafeProductTemplatePath($path)) {
-            return $path;
+        if (is_string($path)) {
+            $resolved = self::resolveSafeProductTemplatePath($path);
+            if ($resolved !== false) {
+                return $resolved;
+            }
         }
 
         if (is_string($path) && $path !== '') {
             self::logEvent('product_item_path_rejected', 'Chemin refuse : ' . $path);
         }
 
-        return 'catalog/_partials/miniatures/product.tpl';
+        return $default;
     }
 
     public static function scanInstallation()
     {
         $findings = [];
-        foreach (self::getScanRoots() as $root) {
-            if (!is_dir($root)) {
+        $root = realpath(_PS_MODULE_DIR_ . 'appagebuilder/');
+        if ($root === false || !is_dir($root)) {
+            return $findings;
+        }
+        $rootNormalized = rtrim(str_replace('\\', '/', $root), '/') . '/';
+
+        // Perimetre volontairement strict : uniquement /modules/appagebuilder/.
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
+        );
+        foreach ($iterator as $fileInfo) {
+            if (!$fileInfo->isFile() || $fileInfo->isLink()) {
                 continue;
             }
-            $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
-            );
-            foreach ($iterator as $fileInfo) {
-                if (!$fileInfo->isFile()) {
-                    continue;
-                }
-                self::scanOneFile($fileInfo->getPathname(), $findings);
+
+            $realFile = realpath($fileInfo->getPathname());
+            if ($realFile === false || strpos(str_replace('\\', '/', $realFile), $rootNormalized) !== 0) {
+                continue;
             }
+
+            self::scanOneFile($realFile, $findings);
         }
 
         return $findings;
@@ -202,8 +257,8 @@ class PhApPageBuilderGuardCore
             return false;
         }
 
-        $log = $dir . '/' . self::LOG_FILE;
-        self::rotateLogs($log);
+        $log = self::getProtectedLogPath($dir, 0);
+        self::rotateLogs($dir);
 
         $entry = [
             'date' => date('c'),
@@ -227,6 +282,9 @@ class PhApPageBuilderGuardCore
             return false;
         }
 
+        if (!is_file($log)) {
+            @file_put_contents($log, self::LOG_GUARD, LOCK_EX);
+        }
         $ok = @file_put_contents($log, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
         if ($ok !== false) {
             @chmod($log, 0600);
@@ -242,9 +300,10 @@ class PhApPageBuilderGuardCore
         $limit = max(1, min(250, (int) $limit));
         $dir = self::getLogDir();
         $entries = [];
-        $files = [$dir . '/' . self::LOG_FILE];
-        for ($i = 1; $i <= self::MAX_LOG_FILES; ++$i) {
-            $files[] = $dir . '/' . self::LOG_FILE . '.' . $i;
+        $files = [];
+        for ($i = 0; $i <= self::MAX_LOG_FILES; ++$i) {
+            $files[] = self::getProtectedLogPath($dir, $i);
+            $files[] = self::getLegacyLogPath($dir, $i);
         }
 
         foreach ($files as $file) {
@@ -269,11 +328,13 @@ class PhApPageBuilderGuardCore
         $dir = self::getLogDir();
         $removed = 0;
         for ($i = 0; $i <= self::MAX_LOG_FILES; ++$i) {
-            $file = $dir . '/' . self::LOG_FILE . ($i ? '.' . $i : '');
-            if (is_file($file) && @unlink($file)) {
-                ++$removed;
+            foreach ([self::getProtectedLogPath($dir, $i), self::getLegacyLogPath($dir, $i)] as $file) {
+                if (is_file($file) && @unlink($file)) {
+                    ++$removed;
+                }
             }
         }
+
         return $removed;
     }
 
@@ -283,24 +344,40 @@ class PhApPageBuilderGuardCore
         $bytes = 0;
         $files = 0;
         for ($i = 0; $i <= self::MAX_LOG_FILES; ++$i) {
-            $file = $dir . '/' . self::LOG_FILE . ($i ? '.' . $i : '');
-            if (is_file($file)) {
-                ++$files;
-                $size = @filesize($file);
-                if ($size !== false) {
-                    $bytes += (int) $size;
+            foreach ([self::getProtectedLogPath($dir, $i), self::getLegacyLogPath($dir, $i)] as $file) {
+                if (is_file($file)) {
+                    ++$files;
+                    $size = @filesize($file);
+                    if ($size !== false) {
+                        $bytes += (int) $size;
+                    }
                 }
             }
         }
-        return ['path' => $dir . '/' . self::LOG_FILE, 'bytes' => $bytes, 'files' => $files];
+
+        return ['path' => self::getProtectedLogPath($dir, 0), 'bytes' => $bytes, 'files' => $files];
+    }
+
+    private static function getProtectedLogPath($dir, $index)
+    {
+        $index = (int) $index;
+        if ($index <= 0) {
+            return $dir . '/' . self::LOG_FILE;
+        }
+
+        return $dir . '/' . self::LOG_PREFIX . '.' . $index . '.php';
+    }
+
+    private static function getLegacyLogPath($dir, $index)
+    {
+        $index = (int) $index;
+
+        return $dir . '/' . self::LEGACY_LOG_FILE . ($index > 0 ? '.' . $index : '');
     }
 
     private static function getLogDir()
     {
-        if (defined('_PS_ROOT_DIR_')) {
-            return rtrim(_PS_ROOT_DIR_, '/\\') . '/var/phappagebuilderguard/logs';
-        }
-        return dirname(dirname(__FILE__)) . '/logs';
+        return rtrim(_PS_ROOT_DIR_, '/\\') . '/var/phappagebuilderguard/logs';
     }
 
     private static function ensurePrivateDirectory($dir)
@@ -324,8 +401,9 @@ class PhApPageBuilderGuardCore
         return true;
     }
 
-    private static function rotateLogs($log)
+    private static function rotateLogs($dir)
     {
+        $log = self::getProtectedLogPath($dir, 0);
         if (!is_file($log)) {
             return;
         }
@@ -334,18 +412,18 @@ class PhApPageBuilderGuardCore
             return;
         }
 
-        $last = $log . '.' . self::MAX_LOG_FILES;
+        $last = self::getProtectedLogPath($dir, self::MAX_LOG_FILES);
         if (is_file($last)) {
             @unlink($last);
         }
         for ($i = self::MAX_LOG_FILES - 1; $i >= 1; --$i) {
-            $src = $log . '.' . $i;
-            $dst = $log . '.' . ($i + 1);
+            $src = self::getProtectedLogPath($dir, $i);
+            $dst = self::getProtectedLogPath($dir, $i + 1);
             if (is_file($src)) {
                 @rename($src, $dst);
             }
         }
-        @rename($log, $log . '.1');
+        @rename($log, self::getProtectedLogPath($dir, 1));
     }
 
     private static function readLogTail($file, $limit)
@@ -433,6 +511,7 @@ class PhApPageBuilderGuardCore
 
         $query = [];
         parse_str($parts['query'], $query);
+        $query = self::filterSecurityPayload($query);
         $query = self::sanitizeLogValue($query, 0);
         $qs = http_build_query($query, '', '&');
 
@@ -443,10 +522,16 @@ class PhApPageBuilderGuardCore
     {
         $payload = [];
         if (!empty($_GET)) {
-            $payload['get'] = self::sanitizeLogValue($_GET, 0);
+            $get = self::filterSecurityPayload($_GET);
+            if ($get) {
+                $payload['get'] = self::sanitizeLogValue($get, 0);
+            }
         }
         if (!empty($_POST)) {
-            $payload['post'] = self::sanitizeLogValue($_POST, 0);
+            $post = self::filterSecurityPayload($_POST);
+            if ($post) {
+                $payload['post'] = self::sanitizeLogValue($post, 0);
+            }
         }
 
         $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -454,6 +539,20 @@ class PhApPageBuilderGuardCore
             return ['_truncated' => substr($json, 0, self::MAX_LOG_PAYLOAD) . '...'];
         }
         return $payload;
+    }
+
+    private static function filterSecurityPayload(array $bucket)
+    {
+        $clean = [];
+        foreach ($bucket as $key => $value) {
+            $key = (string) $key;
+            if (!preg_match('/^(?:action|leoajax|token|widget|show_number|assign|config|p|page|cat_list|list_cat|image_product|wishlist_compare|tabshortcode|tabshortcodekey|form_id|order_by|order_way|categorybox|manufacture|supplier|manuselect|profile|override_folder|nb_products|page_number|columns|limit|use_showmore|product_[a-z0-9_]+|leo_[a-z0-9_]+|pro_[a-z0-9_]+|value_by_[a-z0-9_]+)$/i', $key)) {
+                continue;
+            }
+            $clean[$key] = $value;
+        }
+
+        return $clean;
     }
 
     private static function sanitizeLogValue($value, $depth, $key = '')
@@ -503,19 +602,6 @@ class PhApPageBuilderGuardCore
         return $value;
     }
 
-    private static function apAjaxUsesTokenCheck()
-    {
-        if (!defined('_PS_MODULE_DIR_')) {
-            return false;
-        }
-        $file = _PS_MODULE_DIR_ . 'appagebuilder/apajax.php';
-        $content = @file_get_contents($file);
-        if (!is_string($content) || $content === '') {
-            return false;
-        }
-        return (bool) preg_match("/Tools::getToken\\s*\\(\\s*false\\s*\\)[^\\n]{0,180}Tools::getValue\\s*\\(\\s*[\'\"]token[\'\"]\\s*\\)|Tools::getValue\\s*\\(\\s*[\'\"]token[\'\"]\\s*\\)[^\\n]{0,180}Tools::getToken\\s*\\(\\s*false\\s*\\)/i", $content);
-    }
-
     private static function isEnabled()
     {
         if (!class_exists('Configuration')) {
@@ -552,6 +638,7 @@ class PhApPageBuilderGuardCore
     {
         $intListKeys = [
             'cat_list',
+            'list_cat',
             'product_list_image',
             'product_one_img',
             'product_attribute_one_img',
@@ -566,6 +653,11 @@ class PhApPageBuilderGuardCore
             'product_attribute',
             'product_manufacture',
             'image_product',
+            'categorybox',
+            'manufacture',
+            'supplier',
+            'product_id',
+            'manuselect',
         ];
 
         foreach ($intListKeys as $key) {
@@ -575,6 +667,77 @@ class PhApPageBuilderGuardCore
             }
             self::setRequestValue($key, self::sanitizeIntList($value, $key));
         }
+    }
+
+    private static function sanitizeAjaxSortParameters()
+    {
+        $orderBy = self::getRequestValue('order_by');
+        if ($orderBy !== null && $orderBy !== '') {
+            $allowed = ['position', 'name', 'price', 'id_product', 'date_add', 'date_upd', 'reference', 'manufacturer', 'quantity'];
+            if (!in_array((string) $orderBy, $allowed, true)) {
+                self::block('order_by AJAX invalide');
+            }
+        }
+
+        $orderWay = self::getRequestValue('order_way');
+        if ($orderWay !== null && $orderWay !== '') {
+            $orderWay = strtolower((string) $orderWay);
+            if (!in_array($orderWay, ['asc', 'desc', 'random'], true)) {
+                self::block('order_way AJAX invalide');
+            }
+        }
+    }
+
+    private static function guardUnknownAjaxSqlInjection()
+    {
+        $skip = ['config', 'assign', 'tabshortcode', 'tabshortcodekey'];
+        foreach ([$_GET, $_POST] as $bucket) {
+            foreach ($bucket as $key => $value) {
+                if (in_array((string) $key, $skip, true) || is_array($value) || is_object($value)) {
+                    continue;
+                }
+                // GET/POST sont deja URL-decodes par PHP. Scanner la valeur complete
+                // evite qu'un long prefixe neutre masque une SQLi placee plus loin.
+                if (self::looksLikeHighConfidenceSqlInjection((string) $value)) {
+                    self::block('motif SQLi AJAX detecte : ' . substr((string) $key, 0, 80));
+                }
+            }
+        }
+    }
+
+    private static function looksLikeHighConfidenceSqlInjection($value)
+    {
+        $value = (string) $value;
+
+        // MySQL accepte les commentaires entre les mots-cles. Les normaliser ici
+        // evite qu un parametre AJAX inconnu contourne le filet generique avec
+        // des formes telles que OR/**/1=1 ou UNION/**/SELECT.
+        $value = preg_replace_callback('/\/\*!\s*\d{0,6}\s*(.*?)\*\//s', function ($match) {
+            return ' ' . $match[1] . ' ';
+        }, $value);
+        $value = preg_replace('/\/\*.*?\*\//s', ' ', $value);
+
+        // Ce filet ne doit bloquer que des structures SQL fortement caracterisees.
+        // Les mots anglais courants (Select from, Insert into, Sleep (...)) ne sont
+        // pas suffisants a eux seuls : les parametres historiques connus sont deja
+        // valides strictement plus haut.
+        $patterns = [
+            '/\bunion\s+(?:all\s+)?select\b/i',
+            '/\binformation_schema\b/i',
+            '/\bload_file\s*\(/i',
+            '/\binto\s+(?:out|dump)file\b/i',
+            '/;\s*(?:select|insert|update|delete)\b/i',
+            '/(?:[\)\'"]|\bselect\b)\s*(?:or|and)?\s*.{0,80}\b(?:sleep|benchmark)\s*\(/is',
+            '/[\)\'"]\s*\b(?:or|and)\b\s*(?:\(?\s*)?(?:\d+\s*=\s*\d+|(?:ord|mid|substring|length)\s*\()/i',
+            '/[\)\'"]\s*\b(?:or|and)\b\s*\(?\s*select\b.{0,160}\bfrom\b/is',
+        ];
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $value)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function guardShortcodeAjax()
@@ -594,6 +757,9 @@ class PhApPageBuilderGuardCore
     private static function guardImageGalleryAjax()
     {
         $rawShowNumber = self::getRequestValue('show_number');
+        if (is_array($rawShowNumber) || is_object($rawShowNumber)) {
+            self::block('show_number galerie invalide');
+        }
         if ($rawShowNumber === null || $rawShowNumber === '' || !preg_match('/^\d{1,3}$/', (string) $rawShowNumber)) {
             self::block('show_number galerie invalide');
         }
@@ -668,10 +834,9 @@ class PhApPageBuilderGuardCore
         if (isset($data['form_id'])) {
             $data['form_id'] = (string) $data['form_id'];
             if (!preg_match('/^[a-zA-Z0-9_-]{1,80}$/', $data['form_id'])) {
-                self::block('form_id invalide');
+                self::logEvent('config_form_id_rejected', 'form_id invalide ignore dans config produit');
+                unset($data['form_id']);
             }
-        } else {
-            self::block('form_id manquant');
         }
 
         foreach (['nb_products', 'page_number', 'columns', 'limit'] as $key) {
@@ -792,13 +957,13 @@ class PhApPageBuilderGuardCore
     private static function scanSmartyContent($content, $file, array &$findings)
     {
         $patterns = [
-            'smarty_write_php' => '/file_put_contents\s*\([^)]*\.php/is',
+            'smarty_write_php' => '/file_put_contents\s*\([^)]*\.(?:php|phtml|php[0-9])\b/is',
             'smarty_php_tag' => '/<\?php/i',
             'smarty_superglobal' => '/\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b/i',
-            'smarty_dangerous_function' => '/\b(?:eval|assert|system|exec|shell_exec|passthru|proc_open|popen|base64_decode|gzinflate|gzuncompress|str_rot13|hex2bin|fopen|fwrite|copy|rename|unlink|chmod|curl_exec)\s*\(/i',
-            'smarty_dangerous_tag' => '/\{\s*(?:php|include_php|eval|insert)\b/i',
+            'smarty_execution_expression' => '/\{[^}]{0,600}\b(?:eval|assert|system|exec|shell_exec|passthru|proc_open|popen|file_put_contents|fopen|fwrite|unlink|chmod|chown|mkdir|rmdir|symlink|base64_decode|gzinflate|gzuncompress|str_rot13|hex2bin)\s*\(/is',
+            'smarty_dangerous_tag' => '/\{\s*(?:php|include_php|eval)\b/i',
         ];
-        self::scanWithPatterns($content, $file, $patterns, $findings, 'critical');
+        self::scanWithPatterns($content, $file, $patterns, $findings);
     }
 
     private static function scanPhpContent($content, $file, array &$findings)
@@ -808,16 +973,15 @@ class PhApPageBuilderGuardCore
             'php_dynamic_execution' => '/\b(?:assert|system|exec|shell_exec|passthru|proc_open|popen)\s*\(\s*\$_(?:POST|REQUEST|GET|COOKIE)/i',
             'php_obfuscated_loader' => '/(?:base64_decode|gzinflate|gzuncompress|str_rot13)\s*\([^;]{0,200}\$_(?:POST|REQUEST|GET|COOKIE)/is',
         ];
-        self::scanWithPatterns($content, $file, $patterns, $findings, 'critical');
+        self::scanWithPatterns($content, $file, $patterns, $findings);
     }
 
-    private static function scanWithPatterns($content, $file, array $patterns, array &$findings, $severity)
+    private static function scanWithPatterns($content, $file, array $patterns, array &$findings)
     {
         foreach ($patterns as $type => $pattern) {
             if (preg_match($pattern, $content, $m, PREG_OFFSET_CAPTURE)) {
                 $line = substr_count(substr($content, 0, $m[0][1]), "\n") + 1;
                 $findings[] = [
-                    'severity' => $severity,
                     'type' => $type,
                     'file' => $file,
                     'line' => $line,
@@ -827,29 +991,13 @@ class PhApPageBuilderGuardCore
         }
     }
 
-    private static function getScanRoots()
-    {
-        // Perimetre volontairement strict : uniquement le module appagebuilder.
-        // Ne jamais elargir ce scan a la racine PrestaShop, aux themes ou aux autres modules.
-        $moduleRoot = _PS_MODULE_DIR_ . 'appagebuilder/';
-        $real = realpath($moduleRoot);
-
-        if ($real === false || !is_dir($real)) {
-            return [];
-        }
-
-        return [$real];
-    }
-
     private static function looksLikeSmartyDropper($value)
     {
         $value = (string) $value;
         $patterns = [
-            '/\{\s*(?:php|include_php|eval|insert)\b/i',
-            '/\{[^}]{0,400}\bfile_put_contents\s*\([^)]*\.php/is',
-            '/\b(?:file_put_contents|fopen|fwrite|copy|rename|unlink|chmod|chown|mkdir|rmdir|touch|symlink)\s*\(/i',
-            '/\b(?:file_get_contents|curl_exec)\s*\(/i',
-            '/\b(?:base64_decode|gzinflate|gzuncompress|str_rot13|hex2bin|pack)\s*\(/i',
+            '/\{\s*(?:php|include_php|eval)\b/i',
+            '/\{[^}]{0,600}\b(?:file_put_contents|fopen|fwrite|unlink|chmod|chown|mkdir|rmdir|symlink|assert|system|exec|shell_exec|passthru|proc_open|popen|base64_decode|gzinflate|gzuncompress|str_rot13|hex2bin)\s*\(/is',
+            '/\bfile_put_contents\s*\([^)]*\.(?:php|phtml|php[0-9])\b/is',
             '/\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b/i',
             '/<\?php/i',
         ];
@@ -898,18 +1046,13 @@ class PhApPageBuilderGuardCore
         return false;
     }
 
-    private static function isSafeProductTemplatePath($path)
+    private static function resolveSafeProductTemplatePath($path)
     {
-        $path = str_replace('\\', '/', (string) $path);
+        $path = str_replace('\\', '/', trim((string) $path));
         if ($path === 'catalog/_partials/miniatures/product.tpl') {
-            return true;
+            return $path;
         }
         if ($path === '' || self::hasTraversalOrWrapper($path) || strtolower(pathinfo($path, PATHINFO_EXTENSION)) !== 'tpl') {
-            return false;
-        }
-
-        $real = realpath($path);
-        if ($real === false || !is_file($real)) {
             return false;
         }
 
@@ -920,11 +1063,32 @@ class PhApPageBuilderGuardCore
             _PS_MODULE_DIR_ . 'appagebuilder/views/templates/front/product-item/',
         ];
 
-        $real = str_replace('\\', '/', $real);
-        foreach ($allowedRoots as $root) {
-            $rootReal = realpath($root);
-            if ($rootReal && strpos($real, rtrim(str_replace('\\', '/', $rootReal), '/') . '/') === 0) {
-                return true;
+        $candidates = [];
+        if (preg_match('#^(?:/|[a-z]:/)#i', $path)) {
+            $candidates[] = $path;
+        } else {
+            $candidates[] = rtrim(_PS_ROOT_DIR_, '/\\') . '/' . ltrim($path, '/');
+            $candidates[] = rtrim(_PS_THEME_DIR_, '/\\') . '/' . ltrim($path, '/');
+            $candidates[] = rtrim(_PS_MODULE_DIR_, '/\\') . '/appagebuilder/' . ltrim($path, '/');
+        }
+
+        foreach ($candidates as $candidate) {
+            $real = realpath($candidate);
+            if ($real === false || !is_file($real)) {
+                continue;
+            }
+            $real = str_replace('\\', '/', $real);
+            foreach ($allowedRoots as $root) {
+                $rootReal = realpath($root);
+                if ($rootReal === false) {
+                    continue;
+                }
+                $rootReal = rtrim(str_replace('\\', '/', $rootReal), '/') . '/';
+                if (strpos($real, $rootReal) === 0) {
+                    // Retourne le chemin canonique valide. Smarty inclura ainsi
+                    // exactement le fichier qui vient d'etre valide.
+                    return $real;
+                }
             }
         }
 
@@ -1043,7 +1207,11 @@ class PhApPageBuilderGuardCore
             header('Content-Type: application/json; charset=utf-8');
         }
         exit(json_encode([
+            'success' => false,
             'hasError' => 1,
+            'error' => true,
+            'status' => 'blocked',
+            'message' => 'Requete bloquee par Phenix AP PageBuilder Guard.',
             'errors' => ['Requete bloquee par Phenix AP PageBuilder Guard.'],
         ]));
     }
