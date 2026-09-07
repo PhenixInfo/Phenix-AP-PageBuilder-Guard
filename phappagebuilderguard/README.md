@@ -1,4 +1,4 @@
-# Phenix AP PageBuilder Guard 1.1.16
+# Phenix AP PageBuilder Guard 1.1.17
 
 Module communautaire de durcissement défensif pour les anciennes branches **AP Page Builder / `appagebuilder` 2.2.0 à 2.4.9**, destiné aux boutiques **PrestaShop 1.7.x à 8.x** qui ne peuvent pas encore migrer vers la branche officielle corrigée.
 
@@ -24,7 +24,7 @@ Une mise à jour officielle vers une version corrigée d'AP Page Builder reste p
 - AP Page Builder : **2.2.0 à 2.4.9** pour le patch automatique ;
 - AP Page Builder hors de cette plage : détection, informations et scanner restent accessibles, mais le patch automatique est désactivé.
 
-Archives réellement rejouées pendant la validation de la 1.1.16 : **2.4.1, 2.4.3, 2.4.5 et 2.4.8**. Les autres versions de la plage restent gérées par détection structurelle et arrêt sûr si le point d'insertion n'est pas reconnu.
+Archives réellement rejouées pendant la validation de la 1.1.17 : **2.4.1, 2.4.3, 2.4.5 et 2.4.8**, plus une variante client hybride déclarée 2.4.8 dans `config.xml` mais modifiée localement (`json_decode` dans `ApProductList.php`, version PHP déclarée 4.0.0). Cette archive hybride est utilisée uniquement comme fixture externe de régression et n'est pas redistribuée. Les autres versions de la plage restent gérées par détection structurelle et arrêt sûr si le point d'insertion n'est pas reconnu.
 
 La version AP Page Builder est détectée dans cet ordre :
 
@@ -70,6 +70,14 @@ Le journal est consultable et effaçable depuis l'onglet **Journal**.
 
 
 
+
+
+## Ajustements 1.1.17
+
+- Compatibilité de patch avec une variante client hybride d'AP Page Builder basée sur 2.4.8 qui remplace `Tools::jsonDecode(...)` par `json_decode(...)` dans `ApProductList.php`.
+- Le point d'insertion Base64/config accepte désormais exclusivement ces deux formes équivalentes et conserve le même garde `sanitizeApProductListInput()`.
+- Aucun élargissement du périmètre scanner ni des écritures autorisées.
+- Ajout de cette variante comme cas de régression externe : l'archive cliente n'est pas embarquée ni redistribuée dans le projet.
 
 ## Ajustements 1.1.16
 

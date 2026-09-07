@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.17 - 2026-09-07
+
+- Added fail-safe patch compatibility for a real client AP Page Builder 2.4.8-derived hybrid using native `json_decode()` instead of `Tools::jsonDecode()` for the Base64 `config` path in `ApProductList.php`.
+- Kept the insertion signature narrow: only the two observed equivalent decoders are accepted.
+- Added the hybrid archive as an external regression case without redistributing third-party module code.
+- No scanner scope expansion or runtime security relaxation.
+
 ## 1.1.16 - 2026-09-04
 
 - Validator compliance only: restored the main PHP license comment immediately after `<?php` with no blank line before the file comment.

@@ -27,7 +27,7 @@ class PhApPageBuilderGuard extends Module
     {
         $this->name = 'phappagebuilderguard';
         $this->tab = 'administration';
-        $this->version = '1.1.16';
+        $this->version = '1.1.17';
         $this->author = 'Phenix Info';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -1022,7 +1022,7 @@ class PhApPageBuilderGuard extends Module
         $changed = false;
 
         if (strpos($content, self::PATCH_MARKER . '_PRODUCTLIST_INPUT_START') === false) {
-            $patternInput = '/^([ \\t]*)(\\$input\\s*=\\s*Tools::jsonDecode\\s*\\([^;\\n]*Tools::getValue\\s*\\(\\s*[\\\'\"]config[\\\'\"]\\s*\\)[^;\\n]*\\)\\s*;)[ \\t]*$/m';
+            $patternInput = '/^([ \\t]*)(\\$input\\s*=\\s*(?:Tools::jsonDecode|json_decode)\\s*\\([^;\\n]*Tools::getValue\\s*\\(\\s*[\\\'\"]config[\\\'\"]\\s*\\)[^;\\n]*\\)\\s*;)[ \\t]*$/m';
             $new = preg_replace_callback($patternInput, function ($m) {
                 $i = $m[1];
 
